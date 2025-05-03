@@ -1,92 +1,125 @@
-
 import streamlit as st
 import pandas as pd
+import numpy as np
 import datetime
-import random
-import os
+import re
+from collections import Counter
 
-FICHIER_EXCEL = "Donnees_Tirage.xlsx"
+# Chargement des données Excel
+FICHIER = "Donnees_Tirage.xlsx"
 
-# Charger les données
+@st.cache_data
+
 def charger_donnees():
-    if not os.path.exists(FICHIER_EXCEL):
-        st.error("Fichier Excel non trouvé.")
-        return None, None, None
     try:
-        historiques = pd.read_excel(FICHIER_EXCEL, sheet_name="Historique_Gagnants")
-        series = pd.read_excel(FICHIER_EXCEL, sheet_name="Series_Journalieres")
-        predictions = pd.read_excel(FICHIER_EXCEL, sheet_name="Predictions")
-        return historiques, series, predictions
-    except Exception as e:
-        st.error(f"Erreur lors du chargement : {e}")
+        xls = pd.ExcelFile(FICHIER)
+        histo = xls.parse("Historique_Gagnants")
+        series = xls.parse("Series_Journalieres")
+        preds = xls.parse("Predictions")
+    except:
+        st.error("Erreur lors du chargement des feuilles Excel.")
         return None, None, None
+    return histo, series, preds
 
-# Sauvegarder les données
-def sauvegarder_donnees(df_gagnants, df_series, df_predictions):
-    with pd.ExcelWriter(FICHIER_EXCEL, engine="openpyxl", mode="w") as writer:
-        df_gagnants.to_excel(writer, sheet_name="Historique_Gagnants", index=False)
-        df_series.to_excel(writer, sheet_name="Series_Journalieres", index=False)
-        df_predictions.to_excel(writer, sheet_name="Predictions", index=False)
+# Extraction des chiffres depuis les séries (par unités ou couples)
+def extraire_chiffres(serie_str, mode="unite"):
+    if pd.isna(serie_str): return []
+    numeros = re.findall(r"\\d+", serie_str)
+    resultats = []
+    for num in numeros:
+        if mode == "unite":
+            resultats.extend([int(d) for d in num])
+        elif mode == "couple":
+            resultats.extend([int(num[i:i+2]) for i in range(len(num)-1)])
+    return resultats
 
-# Générer une prédiction simple basée sur des numéros aléatoires
-def generer_prediction():
-    return sorted(random.sample(range(1, 100), 5))
+# Générer une prédiction basée sur l’analyse des séries
 
-# Interface utilisateur
-st.title("🔮 Prédiction Tirage 19h")
+def generer_prediction(series_ligne):
+    unite_totale = []
+    couple_totale = []
 
+    for col in ["Matrice", "Clavier", "Cerveau"]:
+        unite_totale.extend(extraire_chiffres(series_ligne[col], mode="unite"))
+        couple_totale.extend(extraire_chiffres(series_ligne[col], mode="couple"))
+
+    # Ajouter Code et Event comme sources de patterns
+    for col in ["Code", "Event"]:
+        if not pd.isna(series_ligne[col]):
+            unite_totale.extend(extraire_chiffres(str(int(series_ligne[col])), mode="unite"))
+            couple_totale.extend(extraire_chiffres(str(int(series_ligne[col])), mode="couple"))
+
+    # Compter les occurrences
+    unite_freq = Counter(unite_totale)
+    couple_freq = Counter(couple_totale)
+
+    # Sélection des 5 chiffres ou couples les plus fréquents
+    top_couples = [num for num, _ in couple_freq.most_common(10) if 1 <= num <= 99]
+    top_unites = [num for num, _ in unite_freq.most_common(20) if 1 <= num <= 99]
+
+    prediction = sorted(list(set(top_couples + top_unites)))[:5]
+    return prediction
+
+# Comparer prédiction et résultat réel
+
+def evaluer_prediction(pred, reel):
+    return len(set(pred).intersection(set(reel)))
+
+# --- Interface principale Streamlit ---
+
+st.title("🔮 Prédiction du Tirage 19h")
+historique, series, predictions = charger_donnees()
+
+if historique is None:
+    st.stop()
+
+# Sélection automatique ou manuelle de la date du jour
 aujourdhui = datetime.date.today()
-hist, series, preds = charger_donnees()
 
-if hist is not None and series is not None and preds is not None:
-    with st.form("formulaire_prediction"):
-        st.subheader("📩 Entrer les séries du jour")
-        matrice = st.text_input("Matrice")
-        clavier = st.text_input("Clavier")
-        cerveau = st.text_input("Cerveau")
-        code = st.text_input("Code")
-        event = st.text_input("Event")
-        submit = st.form_submit_button("Générer la prédiction")
-        if submit:
-            prediction = generer_prediction()
-            st.success(f"🎯 Prédiction : {prediction}")
-            nouvelle_serie = pd.DataFrame([{
-                "Date": aujourdhui,
-                "Matrice": matrice,
-                "Clavier": clavier,
-                "Cerveau": cerveau,
-                "Code": code,
-                "Event": event
-            }])
-            series = pd.concat([series, nouvelle_serie], ignore_index=True)
-            nouvelle_pred = pd.DataFrame([{
-                "Date": aujourdhui,
-                "Pred1": prediction[0],
-                "Pred2": prediction[1],
-                "Pred3": prediction[2],
-                "Pred4": prediction[3],
-                "Pred5": prediction[4],
-            }])
-            preds = pd.concat([preds, nouvelle_pred], ignore_index=True)
-            sauvegarder_donnees(hist, series, preds)
+serie_du_jour = series[series["Date"] == pd.to_datetime(aujourdhui)]
+if serie_du_jour.empty:
+    st.warning("Aucune série disponible pour aujourd’hui. Veuillez saisir manuellement :")
+    date = st.date_input("Date du jour", value=aujourdhui)
+    matrice = st.text_input("Matrice")
+    clavier = st.text_input("Clavier")
+    cerveau = st.text_input("Cerveau")
+    code = st.text_input("Code")
+    event = st.text_input("Event")
 
-    with st.form("formulaire_resultat"):
-        st.subheader("📊 Entrer les résultats du tirage 19h")
-        n1 = st.number_input("Numéro 1", min_value=1, max_value=99)
-        n2 = st.number_input("Numéro 2", min_value=1, max_value=99)
-        n3 = st.number_input("Numéro 3", min_value=1, max_value=99)
-        n4 = st.number_input("Numéro 4", min_value=1, max_value=99)
-        n5 = st.number_input("Numéro 5", min_value=1, max_value=99)
-        submit_result = st.form_submit_button("Enregistrer les résultats")
-        if submit_result:
-            nouveau_resultat = pd.DataFrame([{
-                "Date": aujourdhui,
-                "Num1": n1,
-                "Num2": n2,
-                "Num3": n3,
-                "Num4": n4,
-                "Num5": n5,
-            }])
-            hist = pd.concat([hist, nouveau_resultat], ignore_index=True)
-            sauvegarder_donnees(hist, series, preds)
-            st.success("Résultats enregistrés avec succès.")
+    if st.button("Lancer la prédiction"):
+        ligne = pd.Series({
+            "Date": date,
+            "Matrice": matrice,
+            "Clavier": clavier,
+            "Cerveau": cerveau,
+            "Code": code,
+            "Event": event
+        })
+        prediction = generer_prediction(ligne)
+        st.success(f"🎯 Prédiction du jour: {prediction}")
+else:
+    ligne = serie_du_jour.iloc[0]
+    prediction = generer_prediction(ligne)
+    st.success(f"🎯 Prédiction automatique du {aujourdhui} : {prediction}")
+
+# Afficher résultat réel s’il existe
+resultat = historique[historique["Date"] == pd.to_datetime(aujourdhui)]
+if not resultat.empty:
+    nums = resultat.iloc[0][["Num1", "Num2", "Num3", "Num4", "Num5"]].dropna().astype(int).tolist()
+    score = evaluer_prediction(prediction, nums)
+    st.info(f"✅ Résultat réel : {nums}")
+    st.info(f"🎯 Prédiction correcte sur {score}/5")
+
+# Sauvegarde automatique dans l'onglet Predictions
+if "prediction" in locals():
+    nouvelles_predictions = pd.DataFrame([{"Date": aujourdhui, **{f"Pred{i+1}": prediction[i] if i < len(prediction) else None for i in range(5)}}])
+    try:
+        anciennes = predictions if predictions is not None else pd.DataFrame()
+        maj = pd.concat([anciennes, nouvelles_predictions]).drop_duplicates("Date", keep="last")
+        with pd.ExcelWriter(FICHIER, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            historique.to_excel(writer, sheet_name="Historique_Gagnants", index=False)
+            series.to_excel(writer, sheet_name="Series_Journalieres", index=False)
+            maj.to_excel(writer, sheet_name="Predictions", index=False)
+        st.success("📝 Prédiction enregistrée dans Predictions.")
+    except Exception as e:
+        st.warning(f"Erreur lors de l'enregistrement: {e}")
